@@ -1,0 +1,37 @@
+{
+	"name": "crypto-storage-lite",
+	"version": "0.0.1",
+	"license": "MIT",
+	"author": "OneWafer",
+	"type": "module",
+	"description": "A simple storage library for the browser with encryption capabilities.",
+	"keywords": ["storage", "local storage", "session storage", "localStorage", "sessionStorage", "crypto", "encryption"],
+	"files": ["dist", "types"],
+	"main": "./dist/storage.umd.cjs",
+	"module": "./dist/storage.js",
+	"types": "./types/index.d.ts",
+	"homepage": "https://github.com/OneWafer/crypto-storage-lite#readme",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/OneWafer/crypto-storage-lite.git"
+	},
+	"exports": {
+		"types": "./types/index.d.ts",
+		"import": "./dist/storage.js",
+		"require": "./dist/storage.umd.cjs"
+	},
+	"scripts": {
+		"dev": "vite",
+		"build": "tsc && vite build"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.3",
+		"@types/crypto-js": "^4.2.2",
+		"crypto-js": "^4.2.0",
+		"typescript": "^5.6.3",
+		"vite": "^5.4.8"
+	},
+	"peerDependencies": {
+		"crypto-js": "^4.2.0"
+	}
+}
