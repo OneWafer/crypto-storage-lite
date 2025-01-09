@@ -1,60 +1,108 @@
+/*
+ * @Author: OneWafer
+ * @Date: 2024-10-11 13:16:46
+ * @LastEditors: OneWafer
+ * @LastEditTime: 2025-01-09 11:08:37
+ * @Description: Local storage utilities with encryption support
+ */
 import { decrypt, encrypt } from './crypto'
 
 /**
- * Set a key-value pair in localStorage, supporting optional encryption.
- *
- * @param key The name of the key
- * @param value The value to be stored
- * @param options Configuration options, optional
- * @param options.encrypt Whether to encrypt, defaults to false
+ * Storage configuration options
  */
-const set = (key: string, value: any, options?: { encrypt?: boolean }) => {
+interface StorageOptions {
+	encrypt?: boolean
+	decrypt?: boolean
+	expires?: number // Expiration time in milliseconds
+}
+
+/**
+ * Storage value wrapper with expiration
+ */
+interface StorageWrapper {
+	value: any
+	expires?: number // Expiration timestamp
+}
+
+/**
+ * Set a key-value pair in localStorage with optional encryption and expiration
+ * @param key The key name
+ * @param value The value to store
+ * @param options Configuration options
+ * @param options.encrypt Whether to encrypt, defaults to false
+ * @param options.expires Expiration time in milliseconds
+ */
+const set = (key: string, value: any, options?: StorageOptions): void => {
 	try {
-		const valueStr = JSON.stringify(value),
-			data = options?.encrypt ? encrypt(valueStr) : valueStr
+		const wrapper: StorageWrapper = {
+			value,
+			expires: options?.expires ? Date.now() + options.expires : undefined
+		}
+		const valueStr = JSON.stringify(wrapper)
+		const data = options?.encrypt ? encrypt(valueStr) : valueStr
 		localStorage.setItem(key, data)
 	} catch (error) {
-		throw new Error(`'localStorage.setItem' error: ${error}`)
+		throw new Error(`Storage failed: ${error}`)
 	}
 }
 
 /**
- * Retrieve the value of a specified key from localStorage, and decrypt it based on options.
- *
- * @param key The name of the key
- * @param options Configuration options, optional
+ * Get a value from localStorage with optional decryption
+ * @param key The key name
+ * @param options Configuration options
  * @param options.decrypt Whether to decrypt, defaults to false
- *
- * @returns {any} The parsed value, or null if parsing fails
+ * @returns The parsed value, or null if parsing fails or expired
  */
-const get = (key: string, options?: { decrypt?: boolean }): any => {
+const get = <T = any>(key: string, options?: StorageOptions): T | null => {
 	try {
-		const value = localStorage.getItem(key),
-			data = value && options?.decrypt ? decrypt(value) : value
-		return JSON.parse(data as string)
+		const value = localStorage.getItem(key)
+		if (!value) return null
+
+		const data = options?.decrypt ? decrypt(value) : value
+		const wrapper = JSON.parse(data) as StorageWrapper
+
+		// Check if expired
+		if (wrapper.expires && wrapper.expires < Date.now()) {
+			localStorage.removeItem(key)
+			return null
+		}
+
+		return wrapper.value as T
 	} catch {
 		return null
 	}
 }
 
 /**
- * Checks if a specified key exists in localStorage.
- *
- * @param key The key to be checked.
- * @returns {boolean} Returns true if the specified key exists in localStorage; otherwise, returns false.
+ * Check if a key exists in localStorage and not expired
+ * @param key The key to check
+ * @returns True if the key exists and not expired, false otherwise
  */
-const has = (key: string): boolean => localStorage.getItem(key) !== null
+const has = (key: string): boolean => {
+	const value = localStorage.getItem(key)
+	if (!value) return false
+
+	try {
+		const wrapper = JSON.parse(value) as StorageWrapper
+		if (wrapper.expires && wrapper.expires < Date.now()) {
+			localStorage.removeItem(key)
+			return false
+		}
+		return true
+	} catch {
+		return false
+	}
+}
 
 /**
- * Removes the item with the specified key from localStorage.
- *
- * @param key The key name.
+ * Remove a key from localStorage
+ * @param key The key name
  */
-const remove = (key: string) => localStorage.removeItem(key)
+const remove = (key: string): void => localStorage.removeItem(key)
 
 /**
- * Clears all data from localStorage.
+ * Clear all data from localStorage
  */
-const clear = () => localStorage.clear()
+const clear = (): void => localStorage.clear()
 
 export { set, get, has, remove, clear }

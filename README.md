@@ -1,10 +1,37 @@
+<!--
+ * @Author: OneWafer
+ * @Date: 2025-01-09 10:53:45
+ * @LastEditors: OneWafer
+ * @LastEditTime: 2025-01-09 11:06:49
+ * @Description: Do not edit
+-->
 # crypto-storage-lite
 
 <div>
   <h3 align="center">
-    A lightweight storage library for the browser with encryption capabilities.
+    A lightweight and secure browser storage library with built-in encryption support for localStorage and sessionStorage.
   </h3>
 </div>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/crypto-storage-lite">
+    <img src="https://img.shields.io/npm/dm/crypto-storage-lite.svg" alt="npm downloads" height="18">
+  </a>
+  <a href="https://www.npmjs.com/package/crypto-storage-lite">
+    <img src="https://img.shields.io/npm/v/crypto-storage-lite.svg" alt="npm version" height="18">
+  </a>
+  <a href="https://github.com/OneWafer/crypto-storage-lite">
+    <img src="https://img.shields.io/npm/l/crypto-storage-lite.svg" alt="MIT license" height="18">
+  </a>
+</p>
+
+## Features
+
+- 🔒 Built-in encryption support
+- 🚀 Lightweight and zero dependencies
+- 💾 Support for both localStorage and sessionStorage
+- 🔄 Type-safe with TypeScript support
+- ⏰ Automatic expiration handling
 
 ## Install
 
@@ -41,51 +68,13 @@ local.clear();
 session.clear();
 ```
 
-Encryption:
+Encryption and Expiration:
 ```js
 import { local } from "crypto-storage-lite";
 
 // Set a value in the localStorage with encryption
-local.set("password", "secretPassword", { encrypt: true });
+local.set("password", "secretPassword", { encrypt: true, expires: 1000*60*60*24 });
 
 // Get a value from the localStorage with decryption
 console.log(local.get("password", { decrypt: true })); // secretPassword
 ```
-
-## API
-
-### `local.set(key, value, options)`
-
-Set a value in the localStorage.
-
-- `key` - The key of the value.
-- `value` - The value to set.
-- `options` - An object with the following properties:
-  - `encrypt` - Encrypt the value before setting it in the localStorage.
-
-### `local.get(key, options)`
-- `key` - The key of the value.
-- `options` - An object with the following properties:
-  - `decrypt` - Decrypt the value before returning it.
-
-### `local.remove(key)`
-- `key` - The key of the value.
-
-### `local.has(key)`
-- `key` - The key of the value.
-
-### `local.clear()`
-
-### `session.set(key, value, options)`
-Same as `local.set`.
-
-### `session.get(key, options)`
-Same as `local.get`.
-
-### `session.remove(key)`
-Same as `local.remove`.
-
-### `session.has(key)`
-Same as `local.has`.
-
-### `session.clear()`
