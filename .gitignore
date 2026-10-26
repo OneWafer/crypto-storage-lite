@@ -26,5 +26,3 @@ types
 
 # Output of 'npm pack'
 *.tgz
-
-pnpm-lock.yaml
