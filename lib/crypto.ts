@@ -15,9 +15,9 @@ const IV_BYTES = 12 // 96-bit nonce, the size AES-GCM is designed for
  * The library's built-in AES-256 key. It ships inside the bundle, so it cannot
  * hide data from anyone who can read this source: it defends against casual
  * inspection of the storage area (devtools, a shared machine, a synced profile
- * dump), not against an attacker who has your code. Pass your own key to
- * `configureStorage({ key })` if you need a real trust boundary, and see the
- * "Security notes" section of the README.
+ * dump), not against an attacker who has your code. A custom key requires
+ * appropriate key management and still does not protect against JavaScript
+ * executing in your page. See the "Security notes" section of the README.
  */
 const BUILT_IN_KEY = new Uint8Array([
 	0x3d, 0x53, 0xf5, 0x6c, 0x10, 0xf4, 0xf7, 0x7b, 0x42, 0xe4, 0xfb, 0x26, 0x81, 0xd2, 0x55, 0x41, 0x4b, 0x7e, 0xd2,
@@ -75,9 +75,9 @@ const fromBase64 = (value: string): Uint8Array<ArrayBuffer> => {
  * Encrypt UTF-8 text.
  *
  * A fresh random IV is generated per call, so identical plaintexts produce
- * different ciphertexts. `context` is authenticated but not encrypted, binding
- * the ciphertext to where it is stored: a payload copied to another key or
- * another storage area (or with tampered content) fails to decrypt.
+ * different ciphertexts. `context` is authenticated but not encrypted: altered
+ * ciphertext or a different context fails authentication. Copying a payload
+ * into an identical context, including replaying an older payload, is not detected.
  *
  * @returns `<iv>.<ciphertext>` in base64
  */

@@ -76,12 +76,117 @@ describe('onError policy', () => {
 		expect(() => driver.get('k', throwing)).toThrowError(TypeError)
 	})
 
+	it('applies the ignore policy to a rejected validator', () => {
+		configureStorage({ onError: 'ignore' })
+		const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const fake = createFailableArea()
+		const driver = createStorage(() => fake.area)
+		driver.set('k', 1)
+		expect(driver.get('k', (value): value is string => typeof value === 'string')).toBeNull()
+		expect(warning).toHaveBeenCalledTimes(1)
+	})
+
 	it('never applies the policy to writes', () => {
 		configureStorage({ onError: 'ignore' })
 		const fake = createFailableArea()
 		fake.fail(['setItem'], namedError('QuotaExceededError'))
 		const driver = createStorage(() => fake.area)
 		expect(() => driver.set('k', 1)).toThrowError(expect.objectContaining({ code: 'QUOTA_EXCEEDED' }))
+	})
+})
+
+describe('storage probes', () => {
+	it.each(['', 'app:'])('preserves data under the former fixed probe key (prefix=%s)', prefix => {
+		const name = `${prefix}__crypto-storage-lite_probe__`
+		const fake = createFailableArea({ [name]: 'business data' })
+		const driver = createStorage(() => fake.area, { prefix })
+		expect(driver.get('missing')).toBeNull()
+		expect(driver.isPersistent).toBe(true)
+		expect([...fake.raw.entries()]).toEqual([[name, 'business data']])
+	})
+
+	it('skips a generated probe key when it already exists', () => {
+		vi.spyOn(Date, 'now').mockReturnValue(0)
+		vi.spyOn(Math, 'random').mockReturnValue(0.25)
+		const fake = createFailableArea()
+		const reading = vi.spyOn(fake.area, 'getItem').mockImplementationOnce(name => {
+			fake.raw.set(name, 'existing data')
+			return 'existing data'
+		})
+		const writing = vi.spyOn(fake.area, 'setItem')
+		const driver = createStorage(() => fake.area)
+		expect(driver.isPersistent).toBe(true)
+		const occupiedName = reading.mock.calls[0]![0]
+		expect([...fake.raw.entries()]).toEqual([[occupiedName, 'existing data']])
+		expect(writing).toHaveBeenCalledTimes(1)
+		expect(writing.mock.calls[0]![0]).not.toBe(occupiedName)
+	})
+
+	it('cleans up the probe when verification throws', () => {
+		const fake = createFailableArea()
+		vi.spyOn(fake.area, 'getItem').mockImplementation(name => {
+			if (fake.raw.has(name)) throw namedError('SecurityError')
+			return null
+		})
+		const driver = createStorage(() => fake.area)
+		expect(driver.isPersistent).toBe(false)
+		expect(fake.raw.size).toBe(0)
+		driver.set('k', 'memory')
+		expect(driver.get('k')).toBe('memory')
+	})
+
+	it('attempts cleanup when a probe write stores data and then throws', () => {
+		const fake = createFailableArea()
+		vi.spyOn(fake.area, 'setItem').mockImplementation((name, value) => {
+			fake.raw.set(name, value)
+			throw namedError('SecurityError')
+		})
+		const removing = vi.spyOn(fake.area, 'removeItem')
+		const driver = createStorage(() => fake.area)
+		expect(driver.isPersistent).toBe(false)
+		expect(removing).toHaveBeenCalledTimes(1)
+		expect(fake.raw.size).toBe(0)
+	})
+
+	it('cleans up a probe that does not read back correctly', () => {
+		const fake = createFailableArea()
+		vi.spyOn(fake.area, 'getItem').mockImplementation(name => (fake.raw.has(name) ? 'not accepted' : null))
+		const driver = createStorage(() => fake.area)
+		expect(driver.isPersistent).toBe(false)
+		expect(fake.raw.size).toBe(0)
+	})
+
+	it('does not write or delete anything when the collision check fails', () => {
+		const fake = createFailableArea({ keep: 'cs1p:1' })
+		fake.fail(['getItem'], namedError('SecurityError'))
+		const writing = vi.spyOn(fake.area, 'setItem')
+		const removing = vi.spyOn(fake.area, 'removeItem')
+		const driver = createStorage(() => fake.area)
+		expect(driver.isPersistent).toBe(false)
+		expect(writing).not.toHaveBeenCalled()
+		expect(removing).not.toHaveBeenCalled()
+		expect(fake.raw.get('keep')).toBe('cs1p:1')
+	})
+
+	it('keeps existing data readable when both probe writing and cleanup report quota errors', () => {
+		const fake = createFailableArea({ keep: 'cs1p:"old"' })
+		fake.fail(['setItem', 'removeItem'], namedError('QuotaExceededError'))
+		const driver = createStorage(() => fake.area)
+		expect(driver.get('keep')).toBe('old')
+		expect(driver.isPersistent).toBe(true)
+		expect(() => driver.set('k', 'new')).toThrowError(expect.objectContaining({ code: 'QUOTA_EXCEEDED' }))
+		expect(fake.raw.get('keep')).toBe('cs1p:"old"')
+	})
+
+	it('falls back without throwing when probe cleanup is blocked', () => {
+		const fake = createFailableArea()
+		fake.fail(['removeItem'], namedError('SecurityError'))
+		const removing = vi.spyOn(fake.area, 'removeItem')
+		const driver = createStorage(() => fake.area)
+		expect(driver.isPersistent).toBe(false)
+		expect(removing).toHaveBeenCalledTimes(1)
+		driver.set('k', 'memory')
+		expect(driver.get('k')).toBe('memory')
 	})
 })
 
@@ -121,6 +226,29 @@ describe('quota, blocked storage and fallback', () => {
 		expect(driver.isPersistent).toBe(false)
 		driver.set('k', 'v')
 		expect(driver.get('k')).toBe('v')
+	})
+
+	it('keeps request-scoped memory drivers independent', () => {
+		const createRequestStorage = () => createStorage(() => null)
+		const first = createRequestStorage()
+		const second = createRequestStorage()
+		first.set('user', { id: 'first' })
+		expect(second.get('user')).toBeNull()
+		second.set('user', { id: 'second' })
+		first.clear()
+		expect(first.get('user')).toBeNull()
+		expect(second.get('user')).toEqual({ id: 'second' })
+	})
+
+	it('does not automatically reconnect after falling back to memory', () => {
+		const fake = createFailableArea()
+		let available = false
+		const driver = createStorage(() => (available ? fake.area : null))
+		driver.set('k', 'memory')
+		available = true
+		expect(driver.isPersistent).toBe(false)
+		expect(driver.get('k')).toBe('memory')
+		expect(fake.raw.size).toBe(0)
 	})
 
 	it('falls back to memory when the resolver throws', () => {
@@ -166,6 +294,33 @@ describe('quota, blocked storage and fallback', () => {
 		driver.get('k')
 		fake.fail(['removeItem'], namedError('SecurityError'))
 		expect(() => driver.remove('k')).toThrowError(expect.objectContaining({ code: 'STORAGE_UNAVAILABLE' }))
+	})
+
+	it.each(['throw', 'ignore'] as const)('reports a failed ownership read during remove with onError=%s', onError => {
+		configureStorage({ onError })
+		const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const fake = createFailableArea({ k: 'cs1p:1' })
+		const driver = createStorage(() => fake.area)
+		driver.get('k')
+		const cause = new Error('temporary read failure')
+		fake.fail(['getItem'], cause)
+		expect(() => driver.remove('k')).toThrowError(expect.objectContaining({ code: 'READ_FAILED', cause }))
+		expect(fake.raw.get('k')).toBe('cs1p:1')
+		expect(driver.isPersistent).toBe(true)
+		expect(warning).not.toHaveBeenCalled()
+	})
+
+	it('does not call the read-error handler for a failed ownership read during remove', () => {
+		const handler = vi.fn()
+		configureStorage({ onError: handler })
+		const fake = createFailableArea({ k: 'cs1p:1' })
+		const driver = createStorage(() => fake.area)
+		driver.get('k')
+		fake.fail(['getItem'], namedError('SecurityError'))
+		expect(() => driver.remove('k')).toThrowError(expect.objectContaining({ code: 'READ_FAILED' }))
+		expect(fake.raw.get('k')).toBe('cs1p:1')
+		expect(driver.isPersistent).toBe(false)
+		expect(handler).not.toHaveBeenCalled()
 	})
 
 	it('reports a failing clear() as a StorageError', () => {
@@ -219,6 +374,13 @@ describe('configureStorage', () => {
 		expect(getConfig()).toMatchObject({ onError: 'ignore', encryptByDefault: true })
 	})
 
+	it('rejects non-object configuration without changing the defaults', () => {
+		for (const value of [null, 0, true, 'configuration']) {
+			expect(() => configureStorage(value as never)).toThrowError(TypeError)
+			expect(getConfig()).toEqual({ onError: 'throw', encryptByDefault: false, key: null })
+		}
+	})
+
 	it('rejects an invalid onError', () => {
 		expect(() => configureStorage({ onError: 'nope' as never })).toThrowError(TypeError)
 	})
@@ -226,6 +388,70 @@ describe('configureStorage', () => {
 	it('rejects a key that is not 32 bytes', () => {
 		expect(() => configureStorage({ key: new Uint8Array(16) })).toThrowError(TypeError)
 		expect(() => configureStorage({ key: new Uint8Array(33) })).toThrowError(TypeError)
+	})
+
+	it('rejects non-boolean encryption defaults', () => {
+		for (const value of [null, 0, 1, 'false', {}, []]) {
+			expect(() => configureStorage({ encryptByDefault: value as never })).toThrowError(TypeError)
+		}
+	})
+
+	it('rejects values that only look like 32-byte keys', () => {
+		const disguised = Object.defineProperty(new Uint8ClampedArray(32), Symbol.toStringTag, { value: 'Uint8Array' })
+		const cases: unknown[] = [
+			null,
+			'x'.repeat(32),
+			new Array(32).fill(1),
+			{ length: 32 },
+			new DataView(new ArrayBuffer(32)),
+			new Uint16Array(32),
+			new Int8Array(32),
+			new Uint8ClampedArray(32),
+			disguised
+		]
+		for (const key of cases) {
+			expect(() => configureStorage({ key: key as never })).toThrowError(TypeError)
+		}
+	})
+
+	it('accepts and copies a Uint8Array from another execution realm', async () => {
+		const { runInNewContext } = await vi.importActual<{ runInNewContext: (source: string) => Uint8Array }>('node:vm')
+		const key = runInNewContext('new Uint8Array(32).fill(7)')
+		expect(key instanceof Uint8Array).toBe(false)
+		configureStorage({ key })
+		key.fill(9)
+		expect(getConfig().key).toEqual(new Uint8Array(32).fill(7))
+	})
+
+	it('copies only the bytes in a 32-byte key view', () => {
+		const buffer = new Uint8Array(64).fill(5)
+		configureStorage({ key: buffer.subarray(16, 48) })
+		buffer.fill(9)
+		expect(getConfig().key).toEqual(new Uint8Array(32).fill(5))
+	})
+
+	it('does not partially update configuration when validation fails', () => {
+		configureStorage({ key: new Uint8Array(32).fill(1) })
+		const previous = getConfig()
+		expect(() => configureStorage({ onError: 'ignore', encryptByDefault: true, key: new Uint8Array(16) })).toThrowError(
+			TypeError
+		)
+		expect(getConfig()).toEqual(previous)
+		expect(() => configureStorage({ onError: 'ignore', encryptByDefault: 'false' as never })).toThrowError(TypeError)
+		expect(getConfig()).toEqual(previous)
+	})
+
+	it('returns independent key buffers in configuration snapshots', () => {
+		configureStorage({ key: new Uint8Array(32).fill(1) })
+		const first = getConfig()
+		const second = getConfig()
+		expect(Object.isFrozen(first)).toBe(true)
+		expect(first.key).not.toBe(second.key)
+		expect(first.key!.buffer).not.toBe(second.key!.buffer)
+		first.key!.fill(9)
+		new Uint8Array(second.key!.buffer).fill(8)
+		configureStorage({ onError: 'ignore' })
+		expect(getConfig().key).toEqual(new Uint8Array(32).fill(1))
 	})
 
 	it('copies the key so later mutation of the caller buffer has no effect', () => {

@@ -7,7 +7,7 @@ import type { StorageError } from './error.js'
 /**
  * How read failures (corrupted data) are surfaced.
  * - `throw`  (default) — surface a `StorageError`. Failures are bugs and must not hide.
- * - `ignore` — resolve to `null` / `false` and stay quiet.
+ * - `ignore` — warn through `console.warn` and resolve to `null` / `false`.
  *
  * A handler function receives every `StorageError` raised on a read path and
  * makes it a non-fatal miss, which is the hook for logging or telemetry.
@@ -38,6 +38,10 @@ export interface ResolvedConfig {
 }
 
 const KEY_BYTES = 32
+const typedArrayName = Object.getOwnPropertyDescriptor(
+	Object.getPrototypeOf(Uint8Array.prototype),
+	Symbol.toStringTag
+)?.get
 
 const DEFAULT_CONFIG: ResolvedConfig = Object.freeze({
 	onError: 'throw',
@@ -59,12 +63,19 @@ let config: ResolvedConfig = DEFAULT_CONFIG
  * a confusing runtime failure.
  */
 export const configureStorage = (next: StorageConfig): void => {
+	if (typeof next !== 'object' || next === null) throw new TypeError('Storage configuration must be an object.')
 	const { onError, encryptByDefault, key } = next
 
 	if (onError !== undefined && onError !== 'throw' && onError !== 'ignore' && typeof onError !== 'function') {
 		throw new TypeError('`onError` must be "throw", "ignore" or a handler function.')
 	}
-	if (key !== undefined && key.length !== KEY_BYTES) {
+	if (encryptByDefault !== undefined && typeof encryptByDefault !== 'boolean') {
+		throw new TypeError('`encryptByDefault` must be a boolean.')
+	}
+	if (
+		key !== undefined &&
+		(!ArrayBuffer.isView(key) || typedArrayName?.call(key) !== 'Uint8Array' || key.length !== KEY_BYTES)
+	) {
 		throw new TypeError(`\`key\` must be a ${KEY_BYTES}-byte Uint8Array (AES-256).`)
 	}
 
@@ -76,7 +87,8 @@ export const configureStorage = (next: StorageConfig): void => {
 	})
 }
 
-export const getConfig = (): ResolvedConfig => config
+export const getConfig = (): ResolvedConfig =>
+	config.key === null ? config : Object.freeze({ ...config, key: new Uint8Array(config.key) })
 
 /**
  * Restore every option to its default (the built-in key, `onError: 'throw'`,

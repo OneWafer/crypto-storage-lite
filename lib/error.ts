@@ -25,7 +25,7 @@ export type StorageErrorCode =
 	| 'WRITE_FAILED'
 
 /**
- * Error thrown by every failure path in this library.
+ * Error used for storage and data failures; invalid options use `TypeError`.
  * Carries a stable `code` so callers can branch without string matching,
  * and preserves `cause` for debugging.
  */

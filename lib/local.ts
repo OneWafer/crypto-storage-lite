@@ -8,8 +8,9 @@ import { createStorage, resolveWebStorage } from './storage.js'
  * Driver backed by `localStorage`, falling back to an in-memory store when no
  * usable storage area is available. See {@link StorageDriver} for the full API.
  *
- * Its identity is `local`, so a payload copied into `sessionStorage` (or into a
- * namespaced driver) under the same key will not decrypt.
+ * Its identity is `local`; ciphertexts require the same authenticated context.
+ * This is a module-level singleton. In SSR, create a separate driver per request
+ * instead of using its shared in-memory fallback for request-specific data.
  */
 export const local = createStorage(resolveWebStorage('localStorage'), { id: 'local' })
 

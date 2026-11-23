@@ -3,7 +3,7 @@
  * @Description: Tests for the AES-GCM layer
  */
 import { describe, expect, it } from 'vitest'
-import { configureStorage, resetConfig } from '../lib/config'
+import { configureStorage, getConfig, resetConfig } from '../lib/config'
 import { decrypt, encrypt, isCryptoAvailable } from '../lib/crypto'
 import { isStorageError } from '../lib/error'
 
@@ -93,6 +93,18 @@ describe('encrypt / decrypt', () => {
 		resetConfig()
 		configureStorage({ key: bytes(32, 1) })
 		expect(decrypt(encrypt('with custom key'))).toBe('with custom key')
+	})
+
+	it('keeps ciphertext readable after the exposed key and buffer are mutated', () => {
+		resetConfig()
+		configureStorage({ key: bytes(32, 3) })
+		const payload = encrypt('original secret', 'local\u0000token')
+		getConfig().key!.fill(9)
+		new Uint8Array(getConfig().key!.buffer).fill(8)
+		configureStorage({ encryptByDefault: true })
+		expect(decrypt(payload, 'local\u0000token')).toBe('original secret')
+		expect(decrypt(encrypt('new secret'))).toBe('new secret')
+		expect(getConfig().key).toEqual(bytes(32, 3))
 	})
 
 	it('fails with a StorageError, not a bare DOMException', () => {

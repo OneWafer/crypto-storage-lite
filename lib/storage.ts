@@ -18,6 +18,7 @@ const PLAIN_PREFIX = 'cs1p:'
 const ENCRYPTED_PREFIX = 'cs1e:'
 
 const PROBE_SUFFIX = '__crypto-storage-lite_probe__'
+let probeSequence = 0
 
 export interface SetOptions {
 	/** Encrypt the value with AES-GCM. */
@@ -26,21 +27,21 @@ export interface SetOptions {
 
 export interface StorageDriver {
 	/**
-	 * Read a value. Returns `null` when the key is missing, when the key was not
-	 * written by this library, or when the value fails `validate`.
+	 * Read a value. Returns `null` when the key is missing or its format is foreign.
+	 * Invalid data and rejected validation follow `onError` (throwing by default).
 	 */
 	get<T = unknown>(key: string, validate?: (value: unknown) => value is T): T | null
 	/** Write a value. Encrypted when `options.encrypt` or the driver default says so. */
 	set(key: string, value: unknown, options?: SetOptions): void
 	/** Whether a value written by this library exists under the key. */
 	has(key: string): boolean
-	/** Delete a key written by this library. Foreign keys are left alone. */
+	/** Delete a tagged key, or any key inside the driver's exclusive namespace. */
 	remove(key: string): void
-	/** Delete every key written by this library. Other keys are left alone. */
+	/** Delete tagged keys, or every key inside the driver's exclusive namespace. */
 	clear(): void
 	/** Delete every key in the storage area, including other libraries' keys. */
 	clearAll(): void
-	/** Names of the keys written by this library. */
+	/** Names of tagged keys, or all logical names inside the driver's namespace. */
 	keys(): string[]
 	/** False when the runtime provides no usable storage and an in-memory fallback is in use. */
 	readonly isPersistent: boolean
@@ -48,14 +49,14 @@ export interface StorageDriver {
 
 export interface CreateStorageOptions {
 	/**
-	 * Identity mixed into the AES-GCM additional data. A payload written by one
-	 * driver cannot be decrypted by another, even under the same key name.
+	 * Identity mixed into the AES-GCM additional data. Ciphertexts require the
+	 * same authenticated context to decrypt. Does not scope listing or deletion.
 	 */
 	id?: string
 	/**
-	 * Namespace prepended to every key in the underlying storage. When set,
-	 * `keys()` / `clear()` / `remove()` select keys by this prefix instead of
-	 * reading every value in the storage area.
+	 * Exclusive namespace prepended to every key in the underlying storage.
+	 * `keys()` / `clear()` / `remove()` select all keys by this prefix, including
+	 * values without a recognised format tag. Use a non-overlapping prefix.
 	 */
 	prefix?: string
 	/** Encrypt every write by default for this driver. Overrides the global setting. */
@@ -107,7 +108,7 @@ class OpaqueValueError extends Error {}
  * would otherwise surface as a silent loss on write.
  */
 const rejectOpaqueValues = (_key: string, value: unknown): unknown => {
-	if (typeof value === 'function' || typeof value === 'symbol') {
+	if (value === undefined || typeof value === 'function' || typeof value === 'symbol') {
 		throw new OpaqueValueError(typeof value)
 	}
 	return value
@@ -126,17 +127,19 @@ const serializeValue = (key: string, value: unknown): string => {
 	}
 
 	try {
-		return JSON.stringify(value, rejectOpaqueValues)
+		const json = JSON.stringify(value, rejectOpaqueValues)
+		if (json === undefined) throw new OpaqueValueError('undefined')
+		return json
 	} catch (error) {
 		if (error instanceof OpaqueValueError) {
 			throw new StorageError(
-				`Cannot store ${describeKey(key)}: the value contains a ${error.message}, which JSON cannot represent.`,
+				`Cannot store ${describeKey(key)}: the value contains or converts to ${error.message}, which JSON cannot represent.`,
 				'SERIALIZE_FAILED',
 				{ cause: error }
 			)
 		}
 		throw new StorageError(
-			`Cannot serialize the value of ${describeKey(key)}: it contains a circular reference or a BigInt.`,
+			`Cannot serialize the value of ${describeKey(key)}: JSON serialization failed (for example, a circular reference, a BigInt or a throwing toJSON method).`,
 			'SERIALIZE_FAILED',
 			{ cause: error }
 		)
@@ -176,6 +179,15 @@ export const resolveWebStorage =
  *   has none (SSR). Called lazily and may throw.
  */
 export const createStorage = (resolveArea: () => Storage | null, options: CreateStorageOptions = {}): StorageDriver => {
+	if (typeof resolveArea !== 'function') throw new TypeError('`resolveArea` must be a storage accessor function.')
+	if (typeof options !== 'object' || options === null) throw new TypeError('Storage options must be an object.')
+	if (options.id !== undefined && typeof options.id !== 'string') throw new TypeError('`id` must be a string.')
+	if (options.prefix !== undefined && typeof options.prefix !== 'string')
+		throw new TypeError('`prefix` must be a string.')
+	if (options.encrypt !== undefined && typeof options.encrypt !== 'boolean') {
+		throw new TypeError('`encrypt` must be a boolean.')
+	}
+
 	const id = options.id ?? 'default'
 	const prefix = options.prefix ?? ''
 	const memoryArea = createMemoryArea()
@@ -194,15 +206,29 @@ export const createStorage = (resolveArea: () => Storage | null, options: Create
 	 * user then gets an honest `QUOTA_EXCEEDED` on write instead.
 	 */
 	const probeWritable = (store: Storage): boolean => {
-		const name = `${prefix}${PROBE_SUFFIX}`
+		const probePrefix = `${prefix}${PROBE_SUFFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-`
+		let name = ''
+		let attempted = false
+		let writable = false
 		try {
+			do {
+				name = `${probePrefix}${probeSequence++}`
+			} while (store.getItem(name) !== null)
+			attempted = true
 			store.setItem(name, '1')
-			const accepted = store.getItem(name) === '1'
-			store.removeItem(name)
-			return accepted
+			writable = store.getItem(name) === '1'
 		} catch (error) {
-			return isQuotaError(error)
+			writable = isQuotaError(error)
+		} finally {
+			if (attempted) {
+				try {
+					store.removeItem(name)
+				} catch (error) {
+					if (!isQuotaError(error)) writable = false
+				}
+			}
 		}
+		return writable
 	}
 
 	const area = (): Storage => {
@@ -285,9 +311,9 @@ export const createStorage = (resolveArea: () => Storage | null, options: Create
 		raw !== null && (raw.startsWith(PLAIN_PREFIX) || raw.startsWith(ENCRYPTED_PREFIX))
 
 	/**
-	 * Decode a tagged raw value. The encryption context is the storage identity
-	 * plus the fully qualified key, so a payload copied to another key, another
-	 * namespace or another driver fails to decrypt.
+	 * Decode a tagged raw value. The encryption context combines the identity
+	 * and fully qualified key. Different authenticated contexts fail to decrypt;
+	 * identical contexts and plain records are not isolated by the driver instance.
 	 */
 	const decodeValue = (key: string, raw: string): unknown => {
 		if (raw.startsWith(ENCRYPTED_PREFIX)) {
@@ -315,8 +341,17 @@ export const createStorage = (resolveArea: () => Storage | null, options: Create
 		})
 
 	const set = (key: string, value: unknown, setOptions?: SetOptions): void => {
+		if (setOptions !== undefined && (typeof setOptions !== 'object' || setOptions === null)) {
+			throw new TypeError('Set options must be an object.')
+		}
 		// Per-call option > driver option > global default.
 		const encryptThis = setOptions?.encrypt ?? options.encrypt ?? getConfig().encryptByDefault
+		if (
+			typeof encryptThis !== 'boolean' ||
+			(setOptions?.encrypt !== undefined && typeof setOptions.encrypt !== 'boolean')
+		) {
+			throw new TypeError('`encrypt` must be a boolean.')
+		}
 		const json = serializeValue(key, value)
 		const data = encryptThis
 			? `${ENCRYPTED_PREFIX}${encrypt(json, `${id}\u0000${prefix}${key}`)}`
@@ -355,7 +390,6 @@ export const createStorage = (resolveArea: () => Storage | null, options: Create
 	const scanOwned = (): string[] => {
 		const store = area()
 		const found: string[] = []
-		const probeName = `${prefix}${PROBE_SUFFIX}`
 		for (let index = 0; index < store.length; index++) {
 			let name: string | null = null
 			try {
@@ -363,9 +397,7 @@ export const createStorage = (resolveArea: () => Storage | null, options: Create
 			} catch {
 				continue
 			}
-			// A probe write interrupted by a crash can outlive it; it is ours, but
-			// it is not a value anyone stored.
-			if (name === null || name === probeName) continue
+			if (name === null) continue
 
 			if (prefix) {
 				if (name.startsWith(prefix)) found.push(name)
@@ -381,11 +413,11 @@ export const createStorage = (resolveArea: () => Storage | null, options: Create
 
 	const remove = (key: string): void => {
 		// Without a namespace, only delete a key this library actually wrote.
-		if (!prefix && !isOwned(peekItem(key))) return
+		if (!prefix && !isOwned(getItem(key))) return
 		removeItem(prefix + key)
 	}
 
-	/** Only remove keys this library wrote, identified by the format tag. */
+	/** Remove tagged keys, or all keys inside the driver's exclusive namespace. */
 	const clear = (): void => {
 		for (const name of scanOwned()) removeItem(name)
 	}

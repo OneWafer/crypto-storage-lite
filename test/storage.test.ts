@@ -51,6 +51,55 @@ describe('values', () => {
 		expect(fake.raw.size).toBe(0)
 	})
 
+	it.each([false, true])('rejects lossy JSON before overwriting a value (encrypt=%s)', encrypt => {
+		const { driver, fake } = build()
+		driver.set('k', { keep: true }, { encrypt })
+		const original = fake.raw.get('k')
+		const cases: unknown[] = [
+			{ nested: undefined },
+			{ deeper: { value: undefined } },
+			[1, undefined],
+			new Array(2),
+			{ toJSON: () => undefined },
+			{ nested: { toJSON: () => undefined } },
+			{ toJSON: () => Symbol('unsupported') },
+			{ toJSON: () => () => 1 }
+		]
+		for (const value of cases) {
+			expect(() => driver.set('k', value, { encrypt })).toThrowError(
+				expect.objectContaining({ code: 'SERIALIZE_FAILED' })
+			)
+			expect(fake.raw.get('k')).toBe(original)
+			expect(driver.get('k')).toEqual({ keep: true })
+		}
+	})
+
+	it.each([false, true])('preserves a throwing JSON conversion as the cause (encrypt=%s)', encrypt => {
+		const { driver, fake } = build()
+		const cause = new Error('conversion failed')
+		const value = {
+			toJSON: () => {
+				throw cause
+			}
+		}
+		expect(() => driver.set('k', value, { encrypt })).toThrowError(
+			expect.objectContaining({ code: 'SERIALIZE_FAILED', cause })
+		)
+		expect(fake.raw.size).toBe(0)
+	})
+
+	it.each([false, true])('keeps valid JSON conversions working (encrypt=%s)', encrypt => {
+		const { driver } = build()
+		const date = new Date('2025-01-01T00:00:00.000Z')
+		driver.set('date', date, { encrypt })
+		expect(driver.get('date')).toBe(date.toISOString())
+		driver.set('custom', { toJSON: () => ({ converted: true }) }, { encrypt })
+		expect(driver.get('custom')).toEqual({ converted: true })
+		driver.set('null', { toJSON: () => null }, { encrypt })
+		expect(driver.get('null')).toBeNull()
+		expect(driver.has('null')).toBe(true)
+	})
+
 	it('rejects circular references and BigInt', () => {
 		const { driver } = build()
 		const circular: Record<string, unknown> = {}
@@ -78,6 +127,46 @@ describe('values', () => {
 	it('treats malformed stored JSON as PARSE_FAILED', () => {
 		const { driver } = build({}, { k: 'cs1p:{not json' })
 		expect(() => driver.get('k')).toThrowError(expect.objectContaining({ code: 'PARSE_FAILED' }))
+	})
+})
+
+describe('runtime option validation', () => {
+	it('rejects invalid driver identity, prefix and encryption options', () => {
+		for (const value of [null, 0, true, {}, []]) {
+			expect(() => createStorage(() => null, { id: value as never })).toThrowError(TypeError)
+			expect(() => createStorage(() => null, { prefix: value as never })).toThrowError(TypeError)
+		}
+		for (const value of [null, 0, 'false', {}, []]) {
+			expect(() => createStorage(() => null, { encrypt: value as never })).toThrowError(TypeError)
+		}
+	})
+
+	it('rejects invalid accessors and option containers immediately', () => {
+		expect(() => createStorage(null as never)).toThrowError(TypeError)
+		for (const value of [null, 0, true, 'options']) {
+			expect(() => createStorage(() => null, value as never)).toThrowError(TypeError)
+		}
+	})
+
+	it('rejects invalid per-write encryption without overwriting data', () => {
+		const { driver, fake } = build()
+		driver.set('k', 'old')
+		for (const value of [null, 0, 'false', {}, []]) {
+			expect(() => driver.set('k', 'new', { encrypt: value as never })).toThrowError(TypeError)
+			expect(fake.raw.get('k')).toBe('cs1p:"old"')
+		}
+		for (const value of [null, 0, true, 'options']) {
+			expect(() => driver.set('k', 'new', value as never)).toThrowError(TypeError)
+			expect(driver.get('k')).toBe('old')
+		}
+	})
+
+	it('continues accepting empty and Unicode identities and prefixes', () => {
+		for (const value of ['', '应用:', 'with spaces']) {
+			const { driver } = build({ id: value, prefix: value })
+			driver.set('k', 'secret', { encrypt: true })
+			expect(driver.get('k')).toBe('secret')
+		}
 	})
 })
 
@@ -164,12 +253,22 @@ describe('ownership', () => {
 		expect(driver.keys().sort()).toEqual(['a', 'b'])
 	})
 
-	it('keys() ignores a probe key left behind by an interrupted write', () => {
-		const { driver } = build({}, { a: 'cs1p:1', '__crypto-storage-lite_probe__': '1' })
+	it('leaves an untagged value under the former probe name untouched', () => {
+		const { driver, fake } = build({}, { a: 'cs1p:1', '__crypto-storage-lite_probe__': '1' })
 		expect(driver.keys()).toEqual(['a'])
 		driver.clear()
-		// The stale probe key is not a value, but it is ours, so clear() reaps it.
 		expect(driver.keys()).toEqual([])
+		expect([...fake.raw.entries()]).toEqual([['__crypto-storage-lite_probe__', '1']])
+	})
+
+	it.each(['', 'app:'])('lists and clears a user value under the former probe name (prefix=%s)', prefix => {
+		const name = '__crypto-storage-lite_probe__'
+		const { driver, fake } = build({ prefix }, { [`${prefix}${name}`]: 'cs1p:"user value"' })
+		expect(driver.get(name)).toBe('user value')
+		expect(driver.has(name)).toBe(true)
+		expect(driver.keys()).toEqual([name])
+		driver.clear()
+		expect(fake.raw.size).toBe(0)
 	})
 })
 
@@ -198,6 +297,11 @@ describe('encryption', () => {
 		driver.set('b', 'y')
 		expect(fake.raw.get('a')!.startsWith('cs1p:')).toBe(true)
 		expect(fake.raw.get('b')!.startsWith('cs1e:')).toBe(true)
+	})
+
+	it('continues reading plain data when the driver encrypts writes by default', () => {
+		const { driver } = build({ encrypt: true }, { existing: 'cs1p:"plain value"' })
+		expect(driver.get('existing')).toBe('plain value')
 	})
 
 	it('refuses to write encrypted data when getRandomValues is unavailable', () => {
